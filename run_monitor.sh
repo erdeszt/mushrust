@@ -1,3 +1,3 @@
 #!/bin/sh
 
-cargo run --bin monitor --features="monitor-bin"
+DATABASE_URL=sqlite:mushrooms.db cargo run --bin monitor --features="monitor-bin"

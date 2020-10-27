@@ -1,7 +1,21 @@
 use plotters::prelude::*;
+use sqlx::sqlite::SqlitePool;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+mod domain;
+
+use domain::Measurement;
+
+#[async_std::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let pool = SqlitePool::connect("mushrooms.db").await?;
     let output = BitMapBackend::new("mushrooms.png", (640, 480)).into_drawing_area();
+
+    let measurements = sqlx::query_as!(Measurement, "select * from measurements").fetch_all(&pool).await?;
+
+    for measurement in measurements {
+        println!("Measurement: {:?}", measurement);
+    }
+
     
     output.fill(&WHITE);
 

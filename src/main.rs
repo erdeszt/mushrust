@@ -1,5 +1,7 @@
 /**
- * TODO: SPI struct
+ * TODO: 
+ *   - SPI struct
+ *   - Derive sql type for Temperature and Humidity
  */
 use sqlx::sqlite::SqlitePool;
 use gpio_cdev::{Chip, LineRequestFlags, LineHandle};
@@ -7,7 +9,8 @@ use gpio_cdev::errors::Error as GpioError;
 use std::thread::sleep;
 use std::time::Duration;
 use std::error;
-use std::env;
+
+mod domain;
 
 #[derive(Debug, Copy, Clone)]
 struct Temperature(f32);
@@ -15,14 +18,6 @@ struct Temperature(f32);
 struct Humidity(f32);
 #[derive(Debug, Copy, Clone)]
 struct Voltage(f32);
-
-#[derive(Debug, sqlx::FromRow)]
-struct Measurement {
-    at: String,
-    temperature: f32,
-    humidity: f32,
-}
-
 
 const NAME: &str = "mushrust";
 const DEVICE: &str = "/dev/gpiochip0";
@@ -37,8 +32,7 @@ const LOW: u8 = 0;
 
 #[async_std::main]
 async fn main() -> Result<(), Box<dyn error::Error>> {
-
-    let pool = &SqlitePool::connect("mushrooms.db").await?;
+    let pool = SqlitePool::connect("mushrooms.db").await?;
 
     let mut gpio = Chip::new(DEVICE)?;
 
@@ -78,10 +72,11 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
         let humidity_voltage = adc_to_voltage(humidity_input);
         let humidity = voltage_to_humidity(humidity_voltage);
 
-
         println!("{:?} , {:?}", temperature, humidity);
 
-        sleep(Duration::from_millis(1000));
+        sqlx::query!("insert into measurements (at, temperature, humidity) values (datetime(\"now\"), ?, ?)", temperature.0, humidity.0).execute(&pool).await?;
+
+        sleep(Duration::from_secs(60));
     }
 
 }

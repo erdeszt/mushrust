@@ -22,7 +22,7 @@ plotters = { version = "0.3.0", optional = true }
 
 [features]
 firmware-bin = ["gpio-cdev", "sqlx", "async-std"]
-monitor-bin = ["plotters"]
+monitor-bin = ["plotters", "sqlx", "async-std"]
 
 [dependencies.openssl]
 version = "0.10.29"
