@@ -1,6 +1,5 @@
 /**
- * TODO: 
- *   - SPI struct
+ * TODO:
  *   - Derive sql type for Temperature and Humidity
  */
 use sqlx::sqlite::SqlitePool;
@@ -30,45 +29,74 @@ const MISO_PIN: u32 = 4;
 const HIGH: u8 = 1;
 const LOW: u8 = 0;
 
+const TEMPERATURE_CHANNEL: u8 = 0;
+const HUMIDITY_CHANNEL: u8 = 1;
+
+const SLEEP_TIME: Duration = Duration::from_secs(60);
+
+struct SPI {
+    chip_select: LineHandle,
+    clock: LineHandle,
+    mosi: LineHandle,
+    miso: LineHandle,
+}
+
+type SPIResult<T> = Result<T, GpioError>;
+
+impl SPI {
+    fn new(device: &str, name: &str, chip_select_pin: u32, clock_pin: u32, mosi_pin: u32, miso_pin: u32) -> SPIResult<SPI> {
+        let mut gpio = Chip::new(device)?;
+
+        let chip_select = gpio
+            .get_line(chip_select_pin)?
+            .request(LineRequestFlags::OUTPUT, 0, name)?;
+        let clock = gpio
+            .get_line(clock_pin)?
+            .request(LineRequestFlags::OUTPUT, 0, name)?;
+        let mosi = gpio
+            .get_line(mosi_pin)?
+            .request(LineRequestFlags::OUTPUT, 0, name)?;
+        let miso = gpio
+            .get_line(miso_pin)?
+            .request(LineRequestFlags::INPUT, 0, name)?;
+
+        Ok(SPI { chip_select: chip_select, clock: clock, mosi: mosi, miso: miso })
+    }
+
+    fn toggle_select(&self) -> SPIResult<()> {
+        self.chip_select.set_value(HIGH)?;
+        self.chip_select.set_value(LOW)?;
+        Ok(())
+    }
+
+    fn write(&self, bit: u8) -> SPIResult<()> {
+        self.clock.set_value(LOW)?;
+        self.mosi.set_value(bit)?;
+        self.clock.set_value(HIGH)?;
+        Ok(())
+    }
+
+    fn read(&self) -> SPIResult<u8> {
+        self.clock.set_value(LOW)?;
+        let value = self.miso.get_value()?;
+        self.clock.set_value(HIGH)?;
+        Ok(value)
+    }
+}
+
 #[async_std::main]
 async fn main() -> Result<(), Box<dyn error::Error>> {
     let pool = SqlitePool::connect("mushrooms.db").await?;
-
-    let mut gpio = Chip::new(DEVICE)?;
-
-    let chip_select = gpio
-        .get_line(CHIP_SELECT_PIN)?
-        .request(LineRequestFlags::OUTPUT, 0, NAME)?;
-    let clock = gpio
-        .get_line(CLOCK_PIN)?
-        .request(LineRequestFlags::OUTPUT, 0, NAME)?;
-    let mosi = gpio
-        .get_line(MOSI_PIN)?
-        .request(LineRequestFlags::OUTPUT, 0, NAME)?;
-    let miso = gpio
-        .get_line(MISO_PIN)?
-        .request(LineRequestFlags::INPUT, 0, NAME)?;
+    let spi = SPI::new(DEVICE, NAME, CHIP_SELECT_PIN, CLOCK_PIN, MOSI_PIN, MISO_PIN)?;
 
     println!("Starting mushroom monitoring");
 
     loop {
-        let temperature_input = adc_read(
-            &chip_select, 
-            &clock,
-            &mosi,
-            &miso,
-            0,
-        )?;
+        let temperature_input = adc_read(&spi, TEMPERATURE_CHANNEL)?;
         let temperature_voltage = adc_to_voltage(temperature_input);
         let temperature = voltage_to_temperature(temperature_voltage);
 
-        let humidity_input = adc_read(
-            &chip_select, 
-            &clock,
-            &mosi,
-            &miso,
-            1,
-        )?;
+        let humidity_input = adc_read(&spi, HUMIDITY_CHANNEL)?;
         let humidity_voltage = adc_to_voltage(humidity_input);
         let humidity = voltage_to_humidity(humidity_voltage);
 
@@ -76,37 +104,34 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
 
         sqlx::query!("insert into measurements (at, temperature, humidity) values (datetime(\"now\"), ?, ?)", temperature.0, humidity.0).execute(&pool).await?;
 
-        sleep(Duration::from_secs(60));
+        sleep(SLEEP_TIME);
     }
 
 }
 
 fn adc_read(
-    chip_select: &LineHandle, 
-    clock: &LineHandle, 
-    mosi: &LineHandle,
-    miso: &LineHandle,
+    spi: &SPI,
     channel: u8,
 ) -> Result<u16, GpioError> {
-    spi_start(&chip_select)?;
+    spi.toggle_select()?;
 
     // Start bit(1)
-    spi_out(&clock, &mosi, 1)?;
+    spi.write(1)?;
     // Mode selector (1 == Single channel)
-    spi_out(&clock, &mosi, 1)?;
+    spi.write(1)?;
     // Channel selection
-    spi_out(&clock, &mosi, channel)?;
+    spi.write(channel)?;
     // MSB mode(1 == MSB only)
-    spi_out(&clock, &mosi, 1)?;
+    spi.write(1)?;
 
     // Ignore leading null bit
-    spi_in(&clock, &miso)?;
+    spi.read()?;
 
     let mut input = 0;
     let mut idx = 9;
 
     while idx >= 0 {
-        let current_bit = spi_in(&clock, &miso)? as u16;
+        let current_bit = spi.read()? as u16;
 
         input = input | (current_bit << idx);
 
@@ -114,26 +139,6 @@ fn adc_read(
     }
 
     Ok(input)
-}
-
-fn spi_start(chip_select: &LineHandle) -> Result<(), GpioError> {
-    chip_select.set_value(HIGH)?;
-    chip_select.set_value(LOW)?;
-    Ok(())
-}
-
-fn spi_out(clock: &LineHandle, mosi: &LineHandle, value: u8) -> Result<(), GpioError> {
-    clock.set_value(LOW)?; 
-    mosi.set_value(value)?;
-    clock.set_value(HIGH)?;
-    Ok(())
-}
-
-fn spi_in(clock: &LineHandle, miso: &LineHandle) -> Result<u8, GpioError> {
-    clock.set_value(LOW)?;
-    let value = miso.get_value()?;
-    clock.set_value(HIGH)?;
-    Ok(value)
 }
 
 fn voltage_to_humidity(voltage: Voltage) -> Humidity {
