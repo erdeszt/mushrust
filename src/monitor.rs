@@ -1,3 +1,8 @@
+/**
+ * TODO:
+ *   - Display measurements data
+ *   - Download db file
+ */
 use plotters::prelude::*;
 use sqlx::sqlite::SqlitePool;
 

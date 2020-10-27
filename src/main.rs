@@ -1,5 +1,6 @@
 /**
  * TODO:
+ *   - Read 3 times, take average
  *   - Derive sql type for Temperature and Humidity
  */
 use sqlx::sqlite::SqlitePool;
