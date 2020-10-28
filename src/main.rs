@@ -27,6 +27,8 @@ const CLOCK_PIN: u32 = 24;
 const MOSI_PIN: u32 = 27;
 const MISO_PIN: u32 = 4;
 
+const WARNING_PIN: u32 = 22;
+
 const HIGH: u8 = 1;
 const LOW: u8 = 0;
 
@@ -45,19 +47,18 @@ struct SPI {
 type SPIResult<T> = Result<T, GpioError>;
 
 impl SPI {
-    fn new(device: &str, name: &str, chip_select_pin: u32, clock_pin: u32, mosi_pin: u32, miso_pin: u32) -> SPIResult<SPI> {
-        let mut gpio = Chip::new(device)?;
+    fn new(chip: &mut Chip, name: &str, chip_select_pin: u32, clock_pin: u32, mosi_pin: u32, miso_pin: u32) -> SPIResult<SPI> {
 
-        let chip_select = gpio
+        let chip_select = chip
             .get_line(chip_select_pin)?
             .request(LineRequestFlags::OUTPUT, 0, name)?;
-        let clock = gpio
+        let clock = chip
             .get_line(clock_pin)?
             .request(LineRequestFlags::OUTPUT, 0, name)?;
-        let mosi = gpio
+        let mosi = chip
             .get_line(mosi_pin)?
             .request(LineRequestFlags::OUTPUT, 0, name)?;
-        let miso = gpio
+        let miso = chip
             .get_line(miso_pin)?
             .request(LineRequestFlags::INPUT, 0, name)?;
 
@@ -87,8 +88,12 @@ impl SPI {
 
 #[async_std::main]
 async fn main() -> Result<(), Box<dyn error::Error>> {
+    let mut chip = Chip::new(DEVICE)?;
     let pool = SqlitePool::connect("mushrooms.db").await?;
-    let spi = SPI::new(DEVICE, NAME, CHIP_SELECT_PIN, CLOCK_PIN, MOSI_PIN, MISO_PIN)?;
+    let spi = SPI::new(&mut chip, NAME, CHIP_SELECT_PIN, CLOCK_PIN, MOSI_PIN, MISO_PIN)?;
+    let warning_pin = chip
+        .get_line(WARNING_PIN)?
+        .request(LineRequestFlags::OUTPUT, 0, NAME)?;
 
     println!("Starting mushroom monitoring");
 
@@ -100,6 +105,13 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
         let humidity_input = adc_read(&spi, HUMIDITY_CHANNEL)?;
         let humidity_voltage = adc_to_voltage(humidity_input);
         let humidity = voltage_to_humidity(humidity_voltage);
+
+        if temperature.0 < 0f32 || humidity.0 < 0f32 {
+            println!("Negative temperature or humidity value: {:?} , {:?}", temperature, humidity);
+            warning_pin.set_value(HIGH)?;
+        } else {
+            warning_pin.set_value(LOW)?;
+        }
 
         println!("{:?} , {:?}", temperature, humidity);
 
