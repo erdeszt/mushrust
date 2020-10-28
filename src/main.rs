@@ -1,6 +1,5 @@
 /**
  * TODO:
- *   - Read 3 times, take average
  *   - Derive sql type for Temperature and Humidity
  */
 use sqlx::sqlite::SqlitePool;
@@ -28,6 +27,7 @@ const MOSI_PIN: u32 = 27;
 const MISO_PIN: u32 = 4;
 
 const WARNING_PIN: u32 = 22;
+const WARNING_RESET_PIN: u32 = 17;
 
 const HIGH: u8 = 1;
 const LOW: u8 = 0;
@@ -36,6 +36,10 @@ const TEMPERATURE_CHANNEL: u8 = 0;
 const HUMIDITY_CHANNEL: u8 = 1;
 
 const SLEEP_TIME: Duration = Duration::from_secs(60);
+
+const SAMPLE_SIZE: usize = 3;
+
+const HUMIDITY_VOLTAGE_OFFSET: f32 = 0.86;
 
 struct SPI {
     chip_select: LineHandle,
@@ -94,32 +98,64 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
     let warning_pin = chip
         .get_line(WARNING_PIN)?
         .request(LineRequestFlags::OUTPUT, 0, NAME)?;
+    let warning_reset_pin = chip
+        .get_line(WARNING_RESET_PIN)?
+        .request(LineRequestFlags::INPUT, 0, NAME)?;
 
     println!("Starting mushroom monitoring");
 
     loop {
-        let temperature_input = adc_read(&spi, TEMPERATURE_CHANNEL)?;
-        let temperature_voltage = adc_to_voltage(temperature_input);
-        let temperature = voltage_to_temperature(temperature_voltage);
+        let temperature = read_temperature(&spi)?;
+        let humidity = read_humidity(&spi, &warning_pin)?;
+        let warning_reset = warning_reset_pin.get_value()?;
 
-        let humidity_input = adc_read(&spi, HUMIDITY_CHANNEL)?;
-        let humidity_voltage = adc_to_voltage(humidity_input);
-        let humidity = voltage_to_humidity(humidity_voltage);
-
-        if temperature.0 < 0f32 || humidity.0 < 0f32 {
-            println!("Negative temperature or humidity value: {:?} , {:?}", temperature, humidity);
-            warning_pin.set_value(HIGH)?;
-        } else {
+        if warning_reset == HIGH {
             warning_pin.set_value(LOW)?;
         }
 
-        println!("{:?} , {:?}", temperature, humidity);
+        println!("Measurement: {:?} , {:?}", temperature, humidity);
 
         sqlx::query!("insert into measurements (at, temperature, humidity) values (datetime(\"now\"), ?, ?)", temperature.0, humidity.0).execute(&pool).await?;
 
         sleep(SLEEP_TIME);
     }
 
+}
+
+fn read_temperature(spi: &SPI) -> Result<Temperature, GpioError> {
+    let mut sample_sum = 0;
+
+    for _ in 0..SAMPLE_SIZE {
+        sample_sum += adc_read(spi, TEMPERATURE_CHANNEL)?;
+    }
+
+    let sample_average = sample_sum / SAMPLE_SIZE as u16;
+    let average_voltage = adc_to_voltage(sample_average);
+    let average_temperature = voltage_to_temperature(average_voltage);
+
+    Ok(average_temperature)
+}
+
+fn read_humidity(spi: &SPI, warning_pin: &LineHandle) -> Result<Humidity, GpioError> {
+    let mut sample_voltage_sum = 0f32;
+
+    for _ in 0..SAMPLE_SIZE {
+        let sample = adc_read(spi, HUMIDITY_CHANNEL)?;
+        let sample_voltage = adc_to_voltage(sample);
+
+        if sample_voltage.0 < HUMIDITY_VOLTAGE_OFFSET {
+            println!("WARNING: Negative humidity value for voltage level: {:?}", sample_voltage);
+            warning_pin.set_value(HIGH)?;
+        }
+        else {
+            sample_voltage_sum += sample_voltage.0;
+        }
+    }
+
+    let average_voltage = sample_voltage_sum / SAMPLE_SIZE as f32;
+    let humidity = voltage_to_humidity(Voltage(average_voltage));
+
+    Ok(humidity)
 }
 
 fn adc_read(
@@ -155,7 +191,7 @@ fn adc_read(
 }
 
 fn voltage_to_humidity(voltage: Voltage) -> Humidity {
-    Humidity((voltage.0 - 0.86) / 0.03)
+    Humidity((voltage.0 - HUMIDITY_VOLTAGE_OFFSET) / 0.03)
 }
 
 fn voltage_to_temperature(voltage: Voltage) -> Temperature {
