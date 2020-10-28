@@ -1,5 +1,6 @@
 /**
  * TODO:
+ *   - When humidity > 70 turn on fan
  *   - Derive sql type for Temperature and Humidity
  */
 use sqlx::sqlite::SqlitePool;
