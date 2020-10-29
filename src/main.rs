@@ -1,5 +1,6 @@
 /**
  * TODO:
+ *   - Warning for invalid temperatures
  *   - When humidity > 70 turn on fan
  *   - Derive sql type for Temperature and Humidity
  */
