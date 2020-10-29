@@ -1,9 +1,11 @@
 /**
  * TODO:
- *   - Warning for invalid temperatures
  *   - When humidity > 70 turn on fan
  *   - Derive sql type for Temperature and Humidity
  */
+#[macro_use]
+extern crate derive_more;
+
 use sqlx::sqlite::SqlitePool;
 use gpio_cdev::{Chip, LineRequestFlags, LineHandle};
 use gpio_cdev::errors::Error as GpioError;
@@ -13,9 +15,9 @@ use std::error;
 
 mod domain;
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, Add, Div, AddAssign)]
 struct Temperature(f32);
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, Add, Div, AddAssign)]
 struct Humidity(f32);
 #[derive(Debug, Copy, Clone)]
 struct Voltage(f32);
@@ -107,7 +109,7 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
     println!("Starting mushroom monitoring");
 
     loop {
-        let temperature = read_temperature(&spi)?;
+        let temperature = read_temperature(&spi, &warning_pin)?;
         let humidity = read_humidity(&spi, &warning_pin)?;
         let warning_reset = warning_reset_pin.get_value()?;
 
@@ -124,40 +126,49 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
 
 }
 
-fn read_temperature(spi: &SPI) -> Result<Temperature, GpioError> {
-    let mut sample_sum = 0;
+fn read_temperature(spi: &SPI, warning_pin: &LineHandle) -> Result<Temperature, GpioError> {
+    let mut sample_temperature_sum = Temperature(0f32);
 
     for _ in 0..SAMPLE_SIZE {
-        sample_sum += adc_read(spi, TEMPERATURE_CHANNEL)?;
+        let sample_temperature = voltage_to_temperature(
+            adc_to_voltage(adc_read(spi, TEMPERATURE_CHANNEL)?)
+        );
+
+        if sample_temperature.0 < 0f32  || sample_temperature.0 > 40f32 {
+            println!("WARNING: Invalid temperature: {:?}", sample_temperature);
+            warning_pin.set_value(HIGH)?;
+        }
+        else {
+            sample_temperature_sum += sample_temperature;
+        }
     }
 
-    let sample_average = sample_sum / SAMPLE_SIZE as u16;
-    let average_voltage = adc_to_voltage(sample_average);
-    let average_temperature = voltage_to_temperature(average_voltage);
+    let average_temperature = Temperature(sample_temperature_sum.0 / SAMPLE_SIZE as f32);
 
     Ok(average_temperature)
 }
 
+
 fn read_humidity(spi: &SPI, warning_pin: &LineHandle) -> Result<Humidity, GpioError> {
-    let mut sample_voltage_sum = 0f32;
+    let mut sample_humidity_sum = Humidity(0f32);
 
     for _ in 0..SAMPLE_SIZE {
-        let sample = adc_read(spi, HUMIDITY_CHANNEL)?;
-        let sample_voltage = adc_to_voltage(sample);
+        let sample_humidity = voltage_to_humidity(
+            adc_to_voltage(adc_read(spi, HUMIDITY_CHANNEL)?)
+        );
 
-        if sample_voltage.0 < HUMIDITY_VOLTAGE_OFFSET {
-            println!("WARNING: Negative humidity value for voltage level: {:?}", sample_voltage);
+        if sample_humidity.0 < 0f32 || sample_humidity.0 > 100f32 {
+            println!("WARNING: invalid humidity level: {:?}", sample_humidity);
             warning_pin.set_value(HIGH)?;
         }
         else {
-            sample_voltage_sum += sample_voltage.0;
+            sample_humidity_sum += sample_humidity;
         }
     }
 
-    let average_voltage = sample_voltage_sum / SAMPLE_SIZE as f32;
-    let humidity = voltage_to_humidity(Voltage(average_voltage));
+    let average_humidity = Humidity(sample_humidity_sum.0 / SAMPLE_SIZE as f32);
 
-    Ok(humidity)
+    Ok(average_humidity)
 }
 
 fn adc_read(
