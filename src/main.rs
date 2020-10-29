@@ -128,6 +128,7 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
 
 fn read_temperature(spi: &SPI, warning_pin: &LineHandle) -> Result<Temperature, GpioError> {
     let mut sample_temperature_sum = Temperature(0f32);
+    let mut valid_sample_count = 0;
 
     for _ in 0..SAMPLE_SIZE {
         let sample_temperature = voltage_to_temperature(
@@ -139,18 +140,24 @@ fn read_temperature(spi: &SPI, warning_pin: &LineHandle) -> Result<Temperature, 
             warning_pin.set_value(HIGH)?;
         }
         else {
+            valid_sample_count += 1;
             sample_temperature_sum += sample_temperature;
         }
     }
 
-    let average_temperature = Temperature(sample_temperature_sum.0 / SAMPLE_SIZE as f32);
+    if valid_sample_count == 0 {
+        Ok(Temperature(0f32))
+    } else {
+        let average_temperature = Temperature(sample_temperature_sum.0 / valid_sample_count as f32);
 
-    Ok(average_temperature)
+        Ok(average_temperature)
+    }
 }
 
 
 fn read_humidity(spi: &SPI, warning_pin: &LineHandle) -> Result<Humidity, GpioError> {
     let mut sample_humidity_sum = Humidity(0f32);
+    let mut valid_sample_count = 0;
 
     for _ in 0..SAMPLE_SIZE {
         let sample_humidity = voltage_to_humidity(
@@ -162,13 +169,18 @@ fn read_humidity(spi: &SPI, warning_pin: &LineHandle) -> Result<Humidity, GpioEr
             warning_pin.set_value(HIGH)?;
         }
         else {
+            valid_sample_count += 1;
             sample_humidity_sum += sample_humidity;
         }
     }
 
-    let average_humidity = Humidity(sample_humidity_sum.0 / SAMPLE_SIZE as f32);
+    if valid_sample_count == 0 {
+        Ok(Humidity(0f32))
+    } else {
+        let average_humidity = Humidity(sample_humidity_sum.0 / SAMPLE_SIZE as f32);
 
-    Ok(average_humidity)
+        Ok(average_humidity)
+    }
 }
 
 fn adc_read(
