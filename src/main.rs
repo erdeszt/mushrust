@@ -12,8 +12,11 @@ use gpio_cdev::errors::Error as GpioError;
 use std::thread::sleep;
 use std::time::Duration;
 use std::error;
+use warp::Filter;
 
 mod domain;
+
+use domain::Measurement;
 
 #[derive(Debug, Copy, Clone, Add, Div, AddAssign)]
 struct Temperature(f32);
@@ -94,10 +97,47 @@ impl SPI {
     }
 }
 
-#[async_std::main]
+#[derive(Debug)]
+struct SqliteError(sqlx::Error);
+
+impl warp::reject::Reject for SqliteError {}
+
+async fn serve_measurements(pool: sqlx::Pool<sqlx::Sqlite>) -> Result<impl warp::Reply, warp::Rejection> {
+    let measurements = sqlx::query_as!(Measurement, "select * from measurements order by at desc limit 120")
+        .fetch_all(&pool)
+        .await
+        .map_err(|error| warp::reject::custom(SqliteError(error)))?;
+
+    Ok(warp::reply::json(&measurements))
+}
+
+fn with_pool(pool: sqlx::Pool<sqlx::Sqlite>) -> impl Filter<Extract = (sqlx::Pool<sqlx::Sqlite>,), Error = std::convert::Infallible> + Clone {
+    warp::any().map(move || pool.clone())
+}
+
+async fn start_server(pool: sqlx::Pool<sqlx::Sqlite>) -> Result<(), sqlx::Error> {
+    let index_route = warp::get()
+        .and(warp::path::end())
+        .and(warp::fs::file("./ui/index.html"));
+    let measurements_route = warp::path("measurements")
+        .and(with_pool(pool.clone()))
+        .and_then(serve_measurements);
+    let routes = index_route.or(measurements_route);
+
+    warp::serve(routes)
+        .run(([0, 0, 0, 0], 3030))
+        .await;
+
+    Ok(())
+}
+
+#[tokio::main]
 async fn main() -> Result<(), Box<dyn error::Error>> {
-    let mut chip = Chip::new(DEVICE)?;
     let pool = SqlitePool::connect("mushrooms.db").await?;
+
+    tokio::task::spawn(start_server(pool.clone()));
+
+    let mut chip = Chip::new(DEVICE)?;
     let spi = SPI::new(&mut chip, NAME, CHIP_SELECT_PIN, CLOCK_PIN, MOSI_PIN, MISO_PIN)?;
     let warning_pin = chip
         .get_line(WARNING_PIN)?
