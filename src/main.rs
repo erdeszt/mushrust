@@ -102,8 +102,37 @@ struct SqliteError(sqlx::Error);
 
 impl warp::reject::Reject for SqliteError {}
 
-async fn serve_measurements(pool: sqlx::Pool<sqlx::Sqlite>) -> Result<impl warp::Reply, warp::Rejection> {
+async fn serve_measurements_last_two_hours(pool: sqlx::Pool<sqlx::Sqlite>) -> Result<impl warp::Reply, warp::Rejection> {
     let measurements = sqlx::query_as!(Measurement, "select * from measurements order by at desc limit 120")
+        .fetch_all(&pool)
+        .await
+        .map_err(|error| warp::reject::custom(SqliteError(error)))?;
+
+    Ok(warp::reply::json(&measurements))
+}
+
+async fn serve_measurements_last_two_days_hourly(pool: sqlx::Pool<sqlx::Sqlite>) -> Result<impl warp::Reply, warp::Rejection> {
+    let measurements = sqlx::query_as!(
+            Measurement,
+            "select * from measurements
+             where strftime('%M', at) == '00'
+             order by at desc
+             limit 48"
+        )
+        .fetch_all(&pool)
+        .await
+        .map_err(|error| warp::reject::custom(SqliteError(error)))?;
+
+    Ok(warp::reply::json(&measurements))
+}
+
+async fn serve_measurements_all_time_daily(pool: sqlx::Pool<sqlx::Sqlite>) -> Result<impl warp::Reply, warp::Rejection> {
+    let measurements = sqlx::query_as!(
+            Measurement,
+            "select * from measurements
+             where strftime('%H%M', at) == '1200'
+             order by at desc"
+        )
         .fetch_all(&pool)
         .await
         .map_err(|error| warp::reject::custom(SqliteError(error)))?;
@@ -119,10 +148,19 @@ async fn start_server(pool: sqlx::Pool<sqlx::Sqlite>) -> Result<(), sqlx::Error>
     let index_route = warp::get()
         .and(warp::path::end())
         .and(warp::fs::file("./ui/index.html"));
-    let measurements_route = warp::path("measurements")
+    let measurements_route_last_two_hours = warp::path!("measurements" / "last_two_hours")
         .and(with_pool(pool.clone()))
-        .and_then(serve_measurements);
-    let routes = index_route.or(measurements_route);
+        .and_then(serve_measurements_last_two_hours);
+    let measurements_route_last_two_days_hourly = warp::path!("measurements" / "last_two_days_hourly")
+        .and(with_pool(pool.clone()))
+        .and_then(serve_measurements_last_two_days_hourly);
+    let measurements_route_all_time_daily = warp::path!("measurements" / "all_time_daily")
+        .and(with_pool(pool.clone()))
+        .and_then(serve_measurements_all_time_daily);
+    let routes = index_route
+        .or(measurements_route_last_two_hours)
+        .or(measurements_route_last_two_days_hourly)
+        .or(measurements_route_all_time_daily);
 
     warp::serve(routes)
         .run(([0, 0, 0, 0], 3030))
