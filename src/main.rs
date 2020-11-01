@@ -1,6 +1,7 @@
 /**
  * TODO:
- *   - When humidity > 70 turn on fan
+ *   - Split up this file
+ *   - Restore fan cycles once circuit works
  *   - Derive sql type for Temperature and Humidity
  */
 #[macro_use]
@@ -12,6 +13,7 @@ use gpio_cdev::errors::Error as GpioError;
 use std::thread::sleep;
 use std::time::Duration;
 use std::error;
+use std::cmp::Ordering;
 use warp::Filter;
 
 mod domain;
@@ -20,33 +22,24 @@ use domain::Measurement;
 
 #[derive(Debug, Copy, Clone, Add, Div, AddAssign)]
 struct Temperature(f32);
-#[derive(Debug, Copy, Clone, Add, Div, AddAssign)]
+#[derive(Debug, Copy, Clone, PartialEq, Add, Div, AddAssign)]
 struct Humidity(f32);
 #[derive(Debug, Copy, Clone)]
 struct Voltage(f32);
 
-const NAME: &str = "mushrust";
-const DEVICE: &str = "/dev/gpiochip0";
+impl Eq for Humidity { }
 
-const CHIP_SELECT_PIN: u32 = 23;
-const CLOCK_PIN: u32 = 24;
-const MOSI_PIN: u32 = 27;
-const MISO_PIN: u32 = 4;
+impl PartialOrd for Humidity {
+    fn partial_cmp(&self, other: &Humidity) -> Option<Ordering> {
+        self.0.partial_cmp(&other.0)
+    }
+}
 
-const WARNING_PIN: u32 = 22;
-const WARNING_RESET_PIN: u32 = 17;
-
-const HIGH: u8 = 1;
-const LOW: u8 = 0;
-
-const TEMPERATURE_CHANNEL: u8 = 0;
-const HUMIDITY_CHANNEL: u8 = 1;
-
-const SLEEP_TIME: Duration = Duration::from_secs(60);
-
-const SAMPLE_SIZE: usize = 3;
-
-const HUMIDITY_VOLTAGE_OFFSET: f32 = 0.86;
+enum FanState {
+    STOPPED,
+    ON(i32),
+    COOLDOWN(i32),
+}
 
 struct SPI {
     chip_select: LineHandle,
@@ -101,6 +94,37 @@ impl SPI {
 struct SqliteError(sqlx::Error);
 
 impl warp::reject::Reject for SqliteError {}
+
+const NAME: &str = "mushrust";
+const DEVICE: &str = "/dev/gpiochip0";
+
+const CHIP_SELECT_PIN: u32 = 23;
+const CLOCK_PIN: u32 = 24;
+const MOSI_PIN: u32 = 27;
+const MISO_PIN: u32 = 4;
+
+const WARNING_PIN: u32 = 22;
+const WARNING_RESET_PIN: u32 = 17;
+
+const FAN_PIN: u32 = 18;
+
+const HIGH: u8 = 1;
+const LOW: u8 = 0;
+
+const TEMPERATURE_CHANNEL: u8 = 0;
+const HUMIDITY_CHANNEL: u8 = 1;
+
+const SLEEP_TIME: Duration = Duration::from_secs(60);
+
+const SAMPLE_SIZE: usize = 3;
+
+const HUMIDITY_VOLTAGE_OFFSET: f32 = 0.86;
+const HUMIDITY_MAX: Humidity = Humidity(75f32);
+const HUMIDITY_MIN: Humidity = Humidity(65f32);
+
+const FAN_MAX_CYCLE: i32 = 1; // TODO: Should be 3
+const FAN_COOLDOWN_CYCLE: i32 = 1; // TODO: Should be 3
+
 
 async fn serve_measurements_last_two_hours(pool: sqlx::Pool<sqlx::Sqlite>) -> Result<impl warp::Reply, warp::Rejection> {
     let measurements = sqlx::query_as!(Measurement, "select * from measurements order by at desc limit 120")
@@ -171,6 +195,7 @@ async fn start_server(pool: sqlx::Pool<sqlx::Sqlite>) -> Result<(), sqlx::Error>
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn error::Error>> {
+    let mut fan_state = FanState::STOPPED;
     let pool = SqlitePool::connect("mushrooms.db").await?;
 
     tokio::task::spawn(start_server(pool.clone()));
@@ -183,6 +208,9 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
     let warning_reset_pin = chip
         .get_line(WARNING_RESET_PIN)?
         .request(LineRequestFlags::INPUT, 0, NAME)?;
+    let fan_enable = chip
+        .get_line(FAN_PIN)?
+        .request(LineRequestFlags::OUTPUT, 0, NAME)?;
 
     println!("Starting mushroom monitoring");
 
@@ -198,6 +226,35 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
         println!("Measurement: {:?} , {:?}", temperature, humidity);
 
         sqlx::query!("insert into measurements (at, temperature, humidity) values (datetime(\"now\"), ?, ?)", temperature.0, humidity.0).execute(&pool).await?;
+
+        match fan_state {
+            FanState::STOPPED => {
+                if humidity > HUMIDITY_MAX {
+                    println!("Humidity is too high, turning on fan");
+                    fan_enable.set_value(HIGH)?;
+                    fan_state = FanState::ON(0);
+                }
+            }
+            FanState::ON(cycle) => {
+                if cycle >=  FAN_MAX_CYCLE || humidity < HUMIDITY_MIN {
+                    println!("Turning fan off");
+                    fan_enable.set_value(LOW)?;
+                    fan_state = FanState::COOLDOWN(0);
+                }
+                else {
+                    fan_state = FanState::ON(cycle + 1);
+                }
+            }
+            FanState::COOLDOWN(cycle) => {
+                if cycle >= FAN_COOLDOWN_CYCLE {
+                    println!("Fan cooled down, ready for new run");
+                    fan_state = FanState::STOPPED;
+                }
+                else {
+                    fan_state = FanState::COOLDOWN(cycle + 1);
+                }
+            }
+        }
 
         sleep(SLEEP_TIME);
     }
